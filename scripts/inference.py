@@ -24,12 +24,15 @@ from latentsync.whisper.audio2feature import Audio2Feature
 
 
 def main(config, args):
+    # 打印输入视频和音频路径
     print(f"Input video path: {args.video_path}")
     print(f"Input audio path: {args.audio_path}")
     print(f"Loaded checkpoint path: {args.inference_ckpt_path}")
 
+    # 从预训练模型加载调度器
     scheduler = DDIMScheduler.from_pretrained("configs")
 
+    # 根据 cross_attention_dim 选择 Whisper 模型路径
     if config.model.cross_attention_dim == 768:
         whisper_model_path = "checkpoints/whisper/small.pt"
     elif config.model.cross_attention_dim == 384:
@@ -37,24 +40,28 @@ def main(config, args):
     else:
         raise NotImplementedError("cross_attention_dim must be 768 or 384")
 
+    # 初始化音频编码器
     audio_encoder = Audio2Feature(model_path=whisper_model_path, device="cuda", num_frames=config.data.num_frames)
 
+    # 加载 VAE 模型
     vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=torch.float16)
     vae.config.scaling_factor = 0.18215
     vae.config.shift_factor = 0
 
+    # 加载 UNet 模型
     unet, _ = UNet3DConditionModel.from_pretrained(
         OmegaConf.to_container(config.model),
-        args.inference_ckpt_path,  # load checkpoint
+        args.inference_ckpt_path,  # 加载检查点
         device="cpu",
     )
 
     unet = unet.to(dtype=torch.float16)
 
-    # set xformers
+    # 设置 xformers
     if is_xformers_available():
         unet.enable_xformers_memory_efficient_attention()
 
+    # 初始化 LipsyncPipeline
     pipeline = LipsyncPipeline(
         vae=vae,
         audio_encoder=audio_encoder,
@@ -62,6 +69,7 @@ def main(config, args):
         scheduler=scheduler,
     ).to("cuda")
 
+    # 设置随机种子
     if args.seed != -1:
         set_seed(args.seed)
     else:
@@ -69,6 +77,7 @@ def main(config, args):
 
     print(f"Initial seed: {torch.initial_seed()}")
 
+    # 执行管道
     pipeline(
         video_path=args.video_path,
         audio_path=args.audio_path,
@@ -84,16 +93,19 @@ def main(config, args):
 
 
 if __name__ == "__main__":
+    # 设置命令行参数解析器
     parser = argparse.ArgumentParser()
-    parser.add_argument("--unet_config_path", type=str, default="configs/unet.yaml")
-    parser.add_argument("--inference_ckpt_path", type=str, required=True)
-    parser.add_argument("--video_path", type=str, required=True)
-    parser.add_argument("--audio_path", type=str, required=True)
-    parser.add_argument("--video_out_path", type=str, required=True)
+    parser.add_argument("--unet_config_path", type=str, default="configs/unet/second_stage.yaml")
+    parser.add_argument("--inference_ckpt_path", type=str, default="checkpoints/latentsync_unet.pt")
+    parser.add_argument("--video_path", type=str, default="/disk4/huyutao/test_sample/zhulang/zhulang_1080p10s.mp4")
+    parser.add_argument("--audio_path", type=str, default="/disk4/huyutao/test_sample/audio/kanghui_train_30s.mp3")
+    parser.add_argument("--video_out_path", type=str, default="./kh_30s_out.mp4")
     parser.add_argument("--guidance_scale", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=1247)
     args = parser.parse_args()
 
+    # 加载配置
     config = OmegaConf.load(args.unet_config_path)
 
+    # 调用主函数
     main(config, args)

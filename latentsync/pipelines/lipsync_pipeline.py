@@ -41,6 +41,7 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 class LipsyncPipeline(DiffusionPipeline):
     _optional_components = []
 
+    # 初始化方法，设置模型组件
     def __init__(
         self,
         vae: AutoencoderKL,
@@ -116,13 +117,19 @@ class LipsyncPipeline(DiffusionPipeline):
 
         self.set_progress_bar_config(desc="Steps")
 
+    # 启用VAE切片
     def enable_vae_slicing(self):
         self.vae.enable_slicing()
 
+    # 禁用VAE切片
     def disable_vae_slicing(self):
         self.vae.disable_slicing()
 
+    # 启用顺序CPU卸载
     def enable_sequential_cpu_offload(self, gpu_id=0):
+        """
+        用加速库（如 accelerate）时，将模型不进行使用时从指定 GPU 移动到 CPU，以节省 GPU 内存。
+        """
         if is_accelerate_available():
             from accelerate import cpu_offload
         else:
@@ -134,6 +141,7 @@ class LipsyncPipeline(DiffusionPipeline):
             if cpu_offloaded_model is not None:
                 cpu_offload(cpu_offloaded_model, device)
 
+    # 获取执行设备
     @property
     def _execution_device(self):
         if self.device != torch.device("meta") or not hasattr(self.unet, "_hf_hook"):
@@ -147,18 +155,27 @@ class LipsyncPipeline(DiffusionPipeline):
                 return torch.device(module._hf_hook.execution_device)
         return self.device
 
+    # 解码潜在变量
     def decode_latents(self, latents):
+        # 对解码的潜在变量进行缩放和偏移
         latents = latents / self.vae.config.scaling_factor + self.vae.config.shift_factor
         latents = rearrange(latents, "b c f h w -> (b f) c h w")
         decoded_latents = self.vae.decode(latents).sample
         return decoded_latents
 
+    # 为调度器准备额外的步骤参数
     def prepare_extra_step_kwargs(self, generator, eta):
+        """
+        Args 
+            generator: a torch.Generator object, used for sampling when using DDIMScheduler.
+            eta (η): control the noise strength. is only used with the DDIMScheduler, it will be ignored for other schedulers.
+        """
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
         # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
         # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
         # and should be between [0, 1]
 
+        # 检查调度器是否接受 eta
         accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
         extra_step_kwargs = {}
         if accepts_eta:
@@ -170,6 +187,7 @@ class LipsyncPipeline(DiffusionPipeline):
             extra_step_kwargs["generator"] = generator
         return extra_step_kwargs
 
+    # 检查输入参数
     def check_inputs(self, height, width, callback_steps):
         assert height == width, "Height and width must be equal"
 
@@ -184,6 +202,7 @@ class LipsyncPipeline(DiffusionPipeline):
                 f" {type(callback_steps)}."
             )
 
+    # 准备noise latent
     def prepare_latents(self, batch_size, num_frames, num_channels_latents, height, width, dtype, device, generator):
         shape = (
             batch_size,
@@ -193,6 +212,7 @@ class LipsyncPipeline(DiffusionPipeline):
             width // self.vae_scale_factor,
         )
         rand_device = "cpu" if device.type == "mps" else device
+        # 生成随机变量 vae latent
         latents = torch.randn(shape, generator=generator, device=rand_device, dtype=dtype).to(device)
         latents = latents.repeat(1, 1, num_frames, 1, 1)
 
@@ -200,18 +220,22 @@ class LipsyncPipeline(DiffusionPipeline):
         latents = latents * self.scheduler.init_noise_sigma
         return latents
 
+    # 准备mask潜在变量
     def prepare_mask_latents(
         self, mask, masked_image, height, width, dtype, device, generator, do_classifier_free_guidance
     ):
         # resize the mask to latents shape as we concatenate the mask to the latents
         # we do that before converting to dtype to avoid breaking in case we're using cpu_offload
         # and half precision
+
+        # 将mask缩放到vae latent shape， channels = 1
         mask = torch.nn.functional.interpolate(
             mask, size=(height // self.vae_scale_factor, width // self.vae_scale_factor)
         )
         masked_image = masked_image.to(device=device, dtype=dtype)
 
         # encode the mask image into latents space so we can concatenate it to the latents
+        # channels = 4
         masked_image_latents = self.vae.encode(masked_image).latent_dist.sample(generator=generator)
         masked_image_latents = (masked_image_latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
 
@@ -223,12 +247,14 @@ class LipsyncPipeline(DiffusionPipeline):
         mask = rearrange(mask, "f c h w -> 1 c f h w")
         masked_image_latents = rearrange(masked_image_latents, "f c h w -> 1 c f h w")
 
+        # 如果使用do_classifier_free_guidance，将mask和masked_image_latents重复两次
         mask = torch.cat([mask] * 2) if do_classifier_free_guidance else mask
         masked_image_latents = (
             torch.cat([masked_image_latents] * 2) if do_classifier_free_guidance else masked_image_latents
         )
         return mask, masked_image_latents
 
+    # 准备图像潜在变量
     def prepare_image_latents(self, images, device, dtype, generator, do_classifier_free_guidance):
         images = images.to(device=device, dtype=dtype)
         image_latents = self.vae.encode(images).latent_dist.sample(generator=generator)
@@ -238,11 +264,13 @@ class LipsyncPipeline(DiffusionPipeline):
 
         return image_latents
 
+    # 设置进度条配置
     def set_progress_bar_config(self, **kwargs):
         if not hasattr(self, "_progress_bar_config"):
             self._progress_bar_config = {}
         self._progress_bar_config.update(kwargs)
 
+    # 粘贴嘴部区域像素
     @staticmethod
     def paste_surrounding_pixels_back(decoded_latents, pixel_values, masks, device, weight_dtype):
         # Paste the surrounding pixels back, because we only want to change the mouth region
@@ -251,6 +279,7 @@ class LipsyncPipeline(DiffusionPipeline):
         combined_pixel_values = decoded_latents * masks + pixel_values * (1 - masks)
         return combined_pixel_values
 
+    # 将像素值转换为图像
     @staticmethod
     def pixel_values_to_images(pixel_values: torch.Tensor):
         pixel_values = rearrange(pixel_values, "f c h w -> f h w c")
@@ -259,6 +288,7 @@ class LipsyncPipeline(DiffusionPipeline):
         images = images.cpu().numpy()
         return images
 
+    # 仿射变换视频，将人像进行矫正
     def affine_transform_video(self, video_path):
         video_frames = read_video(video_path, use_decord=False)
         faces = []
@@ -274,6 +304,7 @@ class LipsyncPipeline(DiffusionPipeline):
         faces = torch.stack(faces)
         return faces, video_frames, boxes, affine_matrices
 
+    # 恢复仿射变换矫正前的视频
     def restore_video(self, faces, video_frames, boxes, affine_matrices):
         video_frames = video_frames[: faces.shape[0]]
         out_frames = []
@@ -289,6 +320,7 @@ class LipsyncPipeline(DiffusionPipeline):
             out_frames.append(out_frame)
         return np.stack(out_frames, axis=0)
 
+    # 调用方法
     @torch.no_grad()
     def __call__(
         self,
@@ -347,7 +379,7 @@ class LipsyncPipeline(DiffusionPipeline):
         if self.unet.add_audio_layer:
             whisper_feature = self.audio_encoder.audio2feat(audio_path)
             whisper_chunks = self.audio_encoder.feature2chunks(feature_array=whisper_feature, fps=video_fps)
-
+        
             num_inferences = min(len(video_frames), len(whisper_chunks)) // num_frames
         else:
             num_inferences = len(video_frames) // num_frames
@@ -423,6 +455,7 @@ class LipsyncPipeline(DiffusionPipeline):
 
                     # perform guidance
                     if do_classifier_free_guidance:
+                        # 分割成无条件预测和有条件预测
                         noise_pred_uncond, noise_pred_audio = noise_pred.chunk(2)
                         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_audio - noise_pred_uncond)
 
