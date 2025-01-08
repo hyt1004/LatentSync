@@ -35,6 +35,7 @@ def data_processing_pipeline(
     resampled_dir = os.path.join(os.path.dirname(input_dir), "resampled")
     resample_fps_hz_multiprocessing(input_dir, resampled_dir, total_num_workers)
 
+    # 检测场景变化，将每个场景保存为一个视频
     print("Detecting shot...")
     shot_dir = os.path.join(os.path.dirname(input_dir), "shot")
     detect_shot_multiprocessing(resampled_dir, shot_dir, total_num_workers)
@@ -53,13 +54,16 @@ def data_processing_pipeline(
         high_resolution_dir, affine_transformed_dir, temp_dir, resolution, per_gpu_num_workers // 2
     )
 
+    # 如果仿射变换后检测不到人脸，则删除该片段
     print("Removing incorrect affined videos...")
     remove_incorrect_affined_multiprocessing(affine_transformed_dir, total_num_workers)
 
+    # 删除同步置信度小于3的片段
     print("Syncing audio and video...")
     av_synced_dir = os.path.join(os.path.dirname(input_dir), f"av_synced_{sync_conf_threshold}")
     sync_av_multi_gpus(affine_transformed_dir, av_synced_dir, temp_dir, per_gpu_num_workers, sync_conf_threshold)
 
+    # 使用网络预测每个片段的视觉质量，删除质量较差的片段
     print("Filtering visual quality...")
     high_visual_quality_dir = os.path.join(os.path.dirname(input_dir), "high_visual_quality")
     filter_visual_quality_multi_gpus(av_synced_dir, high_visual_quality_dir, per_gpu_num_workers)
