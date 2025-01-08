@@ -9,6 +9,7 @@ import subprocess
 import numpy as np
 import torch
 import torchvision
+import time
 
 from diffusers.utils import is_accelerate_available
 from packaging import version
@@ -309,14 +310,17 @@ class LipsyncPipeline(DiffusionPipeline):
         video_frames = video_frames[: faces.shape[0]]
         out_frames = []
         for index, face in enumerate(faces):
-            x1, y1, x2, y2 = boxes[index]
+            cycle_index = index % (2 * len(video_frames))
+            cycle_index = cycle_index if cycle_index < len(video_frames) else 2 * len(video_frames) - cycle_index - 1
+            
+            x1, y1, x2, y2 = boxes[cycle_index]
             height = int(y2 - y1)
             width = int(x2 - x1)
             face = torchvision.transforms.functional.resize(face, size=(height, width), antialias=True)
             face = rearrange(face, "c h w -> h w c")
             face = (face / 2 + 0.5).clamp(0, 1)
             face = (face * 255).to(torch.uint8).cpu().numpy()
-            out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
+            out_frame = self.image_processor.restorer.restore_img(video_frames[cycle_index], face, affine_matrices[cycle_index])
             out_frames.append(out_frame)
         return np.stack(out_frames, axis=0)
 
@@ -380,7 +384,8 @@ class LipsyncPipeline(DiffusionPipeline):
             whisper_feature = self.audio_encoder.audio2feat(audio_path)
             whisper_chunks = self.audio_encoder.feature2chunks(feature_array=whisper_feature, fps=video_fps)
         
-            num_inferences = min(len(video_frames), len(whisper_chunks)) // num_frames
+            # num_inferences = min(len(video_frames), len(whisper_chunks)) // num_frames
+            num_inferences = len(whisper_chunks) // num_frames
         else:
             num_inferences = len(video_frames) // num_frames
 
@@ -401,6 +406,8 @@ class LipsyncPipeline(DiffusionPipeline):
             generator,
         )
 
+        self.frame_idx = 0
+
         for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
             if self.unet.add_audio_layer:
                 audio_embeds = torch.stack(whisper_chunks[i * num_frames : (i + 1) * num_frames])
@@ -410,7 +417,16 @@ class LipsyncPipeline(DiffusionPipeline):
                     audio_embeds = torch.cat([empty_audio_embeds, audio_embeds])
             else:
                 audio_embeds = None
-            inference_video_frames = video_frames[i * num_frames : (i + 1) * num_frames]
+            # inference_video_frames = video_frames[i * num_frames : (i + 1) * num_frames]
+            inference_video_frames = torch.empty((num_frames, *video_frames[0].shape), device=video_frames.device)  # 创建一个空的张量
+            for idx in range(num_frames):
+                infer_index = self.frame_idx + idx
+                infer_index = infer_index % (len(video_frames) * 2)
+                infer_index = infer_index if infer_index < len(video_frames) else 2 * len(video_frames) - infer_index - 1
+                inference_video_frames[idx] = video_frames[infer_index]  # 直接赋值到张量中
+
+            self.frame_idx = self.frame_idx + num_frames
+
             latents = all_latents[:, :, i * num_frames : (i + 1) * num_frames]
             pixel_values, masked_pixel_values, masks = self.image_processor.prepare_masks_and_masked_images(
                 inference_video_frames, affine_transform=False
@@ -476,12 +492,14 @@ class LipsyncPipeline(DiffusionPipeline):
             synced_video_frames.append(decoded_latents)
             masked_video_frames.append(masked_pixel_values)
 
+        st = time.time()
         synced_video_frames = self.restore_video(
             torch.cat(synced_video_frames), original_video_frames, boxes, affine_matrices
         )
-        masked_video_frames = self.restore_video(
-            torch.cat(masked_video_frames), original_video_frames, boxes, affine_matrices
-        )
+        print(f"Restore video time: {time.time() - st}")
+        # masked_video_frames = self.restore_video(
+        #     torch.cat(masked_video_frames), original_video_frames, boxes, affine_matrices
+        # )
 
         audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
         audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
@@ -494,6 +512,7 @@ class LipsyncPipeline(DiffusionPipeline):
             shutil.rmtree(temp_dir)
         os.makedirs(temp_dir, exist_ok=True)
 
+        st = time.time()
         write_video(os.path.join(temp_dir, "video.mp4"), synced_video_frames, fps=25)
         # write_video(video_mask_path, masked_video_frames, fps=25)
 
@@ -501,3 +520,4 @@ class LipsyncPipeline(DiffusionPipeline):
 
         command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
         subprocess.run(command, shell=True)
+        print(f"Write video time: {time.time() - st}")
