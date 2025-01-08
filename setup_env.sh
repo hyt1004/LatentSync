@@ -21,3 +21,4 @@ mkdir -p ~/.cache/torch/hub/checkpoints
 ln -s $(pwd)/checkpoints/auxiliary/2DFAN4-cd938726ad.zip ~/.cache/torch/hub/checkpoints/2DFAN4-cd938726ad.zip
 ln -s $(pwd)/checkpoints/auxiliary/s3fd-619a316812.pth ~/.cache/torch/hub/checkpoints/s3fd-619a316812.pth
 ln -s $(pwd)/checkpoints/auxiliary/vgg16-397923af.pth ~/.cache/torch/hub/checkpoints/vgg16-397923af.pth
+ln -s $(pwd)/checkpoints/auxiliary/resnet50-19c8e357.pth ~/.cache/torch/hub/checkpoints/resnet50-19c8e357.pth
