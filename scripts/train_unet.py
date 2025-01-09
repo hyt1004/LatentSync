@@ -100,7 +100,7 @@ def main(config):
     vae.to(device)  # 将VAE移动到设备上
 
     syncnet_eval_model = SyncNetEval(device=device)  # 初始化同步网络评估模型
-    syncnet_eval_model.loadParameters("checkpoints/auxiliary/syncnet_v2.model")  # 加载同步网络模型参数
+    syncnet_eval_model.loadParameters("checkpoints/auxiliary/syncnet_v2.model")  # 加载syncnet模型参数
 
     syncnet_detector = SyncNetDetector(device=device, detect_results_dir="detect_results")  # 初始化同步网络检测器
 
@@ -135,16 +135,29 @@ def main(config):
         syncnet.load_state_dict(syncnet_checkpoint["state_dict"])  # 加载状态字典
         syncnet.requires_grad_(False)  # 冻结同步网络参数
 
-    unet.requires_grad_(True)  # 允许UNet参数更新
-    trainable_params = list(unet.parameters())  # 获取可训练参数
+    unet.requires_grad_(False)  # 禁止UNet参数更新
+    # 选择部分参数允许更新
+    # 部分层使用smaller lr
+    trainable_params_with_small_lr = []
+    trainable_params_with_normal_lr = []
+    for name, param in unet.named_parameters():
+        if "mid_block" in name or "up_blocks" in name:
+            param.requires_grad = True  # 允许更新
+            trainable_params_with_small_lr.append(param)
+        elif "conv_norm_out" in name or "conv_out" in name:
+            param.requires_grad = True  # 允许更新
+            trainable_params_with_normal_lr.append(param)
 
     # 如果需要缩放学习率
     if config.optimizer.scale_lr:
         config.optimizer.lr = config.optimizer.lr * num_processes  # 根据进程数缩放学习率
 
-    optimizer = torch.optim.AdamW(trainable_params, lr=config.optimizer.lr)  # 初始化优化器
+    optimizer = torch.optim.AdamW([{'params': trainable_params_with_normal_lr},
+                                   {'params': trainable_params_with_small_lr,
+                                    'lr': config.optimizer.lr / 10}], lr=config.optimizer.lr)  # 初始化优化器
 
     if is_main_process:
+        trainable_params = trainable_params_with_small_lr + trainable_params_with_normal_lr
         logger.info(f"trainable params number: {len(trainable_params)}")  # 记录可训练参数数量
         logger.info(f"trainable params scale: {sum(p.numel() for p in trainable_params) / 1e6:.3f} M")  # 记录可训练参数规模
 
@@ -159,7 +172,7 @@ def main(config):
     if config.run.enable_gradient_checkpointing:
         unet.enable_gradient_checkpointing()  # 启用梯度检查点
 
-    # 获取训练数据集
+    # 获取train dataset
     train_dataset = UNetDataset(config.data.train_data_dir, config)  # 初始化数据集
     distributed_sampler = DistributedSampler(
         train_dataset,
@@ -169,7 +182,7 @@ def main(config):
         seed=config.run.seed,
     )  # 初始化分布式采样器
 
-    # 创建数据加载器
+    # 创建dataloader
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=config.data.batch_size,
@@ -201,7 +214,7 @@ def main(config):
     if config.run.trepa_loss_weight != 0 and config.run.pixel_space_supervise:
         trepa_loss_func = TREPALoss(device=device)  # 初始化TREPA损失函数
 
-    # 验证管道
+    # validation pipeline
     pipeline = LipsyncPipeline(
         vae=vae,
         audio_encoder=audio_encoder,
@@ -257,8 +270,10 @@ def main(config):
 
             if config.model.add_audio_layer:
                 if batch["mel"] != []:
+                    # mel 用于计算 sync loss
                     mel = batch["mel"].to(device, dtype=torch.float16)  # 将音频数据移动到设备
 
+                # audio embeds 用于输入unet中进行特征融合
                 audio_embeds_list = []  # 初始化音频嵌入列表
                 try:
                     for idx in range(len(batch["video_path"])):
@@ -288,6 +303,7 @@ def main(config):
             mask = rearrange(mask, "b f c h w -> (b f) c h w")  # 重排掩码
             ref_images = rearrange(ref_images, "b f c h w -> (b f) c h w")  # 重排参考图像
 
+            # 使用vae进行encode
             with torch.no_grad():
                 gt_latents = vae.encode(gt_images).latent_dist.sample()  # 编码真实图像
                 gt_masked_images = vae.encode(gt_masked_images).latent_dist.sample()  # 编码掩码图像
@@ -353,7 +369,7 @@ def main(config):
             else:
                 recon_loss = 0  # 如果不需要重建损失，设置为0
 
-            pred_latents = reversed_forward(noise_scheduler, pred_noise, timesteps, noisy_tensor)  # 反向推理潜在变量
+            pred_latents = reversed_forward(noise_scheduler, pred_noise, timesteps, noisy_tensor)  # 还原预测的加噪声前的latent
 
             if config.run.pixel_space_supervise:
                 pred_images = vae.decode(
@@ -361,6 +377,7 @@ def main(config):
                     + vae.config.shift_factor
                 ).sample  # 解码预测图像
 
+            # LPIPS Loss
             if config.run.perceptual_loss_weight != 0 and config.run.pixel_space_supervise:
                 pred_images_perceptual = pred_images[:, :, pred_images.shape[2] // 2 :, :]  # 获取感知图像
                 gt_images_perceptual = gt_images[:, :, gt_images.shape[2] // 2 :, :]  # 获取真实图像
@@ -368,6 +385,7 @@ def main(config):
             else:
                 lpips_loss = 0  # 如果不需要感知损失，设置为0
 
+            # TREPA Loss
             if config.run.trepa_loss_weight != 0 and config.run.pixel_space_supervise:
                 trepa_pred_images = rearrange(pred_images, "(b f) c h w -> b c f h w", f=config.data.num_frames)  # 重排预测图像
                 trepa_gt_images = rearrange(gt_images, "(b f) c h w -> b c f h w", f=config.data.num_frames)  # 重排真实图像
@@ -375,6 +393,7 @@ def main(config):
             else:
                 trepa_loss = 0  # 如果不需要TREPA损失，设置为0
 
+            # Sync Loss
             if config.model.add_audio_layer and config.run.use_syncnet:
                 if config.run.pixel_space_supervise:
                     syncnet_input = rearrange(pred_images, "(b f) c h w -> b (f c) h w", f=config.data.num_frames)  # 重排同步网络输入
@@ -406,19 +425,19 @@ def main(config):
 
             # 反向传播
             if config.run.mixed_precision_training:
-                scaler.scale(loss).backward()  # 混合精度反向传播
+                scaler.scale(loss).backward()  # 混合精度，缩放损失，反向传播
                 """ >>> 梯度裁剪 >>> """
                 scaler.unscale_(optimizer)  # 反缩放梯度
-                torch.nn.utils.clip_grad_norm_(unet.parameters(), config.optimizer.max_grad_norm)  # 裁剪梯度
+                torch.nn.utils.clip_grad_norm_(unet.parameters(), config.optimizer.max_grad_norm)  # 裁剪梯度，防止梯度爆炸，稳定训练
                 """ <<< 梯度裁剪 <<< """
-                scaler.step(optimizer)  # 更新优化器
+                scaler.step(optimizer)  # 更新梯度
                 scaler.update()  # 更新缩放器
             else:
                 loss.backward()  # 反向传播
                 """ >>> 梯度裁剪 >>> """
                 torch.nn.utils.clip_grad_norm_(unet.parameters(), config.optimizer.max_grad_norm)  # 裁剪梯度
                 """ <<< 梯度裁剪 <<< """
-                optimizer.step()  # 更新优化器
+                optimizer.step()  # 更新梯度
 
             # 检查注意力块的梯度以进行调试
             # print(unet.module.up_blocks[3].attentions[2].transformer_blocks[0].audio_cross_attn.attn.to_q.weight.grad)
@@ -445,7 +464,7 @@ def main(config):
                 model_save_path = os.path.join(output_dir, f"checkpoints/checkpoint-{global_step}.pt")  # 检查点保存路径
                 state_dict = {
                     "global_step": global_step,
-                    "state_dict": unet.module.state_dict(),  # 解包DDP
+                    "state_dict": {k: v for k, v in unet.module.state_dict().items() if v.requires_grad},  # 只保存未冻结的参数
                 }
                 try:
                     torch.save(state_dict, model_save_path)  # 保存模型状态字典
@@ -505,9 +524,28 @@ if __name__ == "__main__":
 
     # 配置文件路径
     parser.add_argument("--unet_config_path", type=str, default="configs/unet/first_stage.yaml")
+    parser.add_argument("--finetune", action="store_true")
+    parser.add_argument("--finetune_checkpoint_path", type=str, default="./checkpoints/latentsync_unet.pt")
+    parser.add_argument("--train_data_dir", type=str, default="./0finetune_datas/high_visual_quality/")
+    parser.add_argument("--val_video_path", type=str, default="./0finetune_datas/c0118-1080p-10s.mp4")
+    parser.add_argument("--val_audio_path", type=str, default="./0finetune_datas/kanghui_train_30s.mp3")
 
     args = parser.parse_args()  # 解析命令行参数
     config = OmegaConf.load(args.unet_config_path)  # 加载配置
     config.unet_config_path = args.unet_config_path  # 设置配置文件路径
 
+    if args.finetune:
+        config.data.train_output_dir = "finetune_outputs/unet"  # 设置训练输出目录
+        config.data.train_data_dir = args.train_data_dir  # 设置训练数据目录
+        config.data.val_video_path = args.val_video_path  # 设置验证视频路径
+        config.data.val_audio_path = args.val_audio_path  # 设置验证音频路径
+
+        config.run.finetune = True
+        config.run.max_train_steps = 1000  # 设置最大训练步数
+        config.ckpt.save_ckpt_steps = 500  # 设置保存检查点步数
+        config.ckpt.resume_ckpt_path = args.finetune_checkpoint_path
+        
+    import time
+    st = time.time()
     main(config)  # 运行主函数
+    print("training cost: ", time.time() - st)

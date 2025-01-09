@@ -33,13 +33,16 @@ wandb/
 
 # data files
 *.mp4
+*.mp3
 *.avi
 *.wav
 *.png
 *.jpg
 *.jpeg
 *.csv
+unet_keys.txt
 
 !/latentsync/utils/mask.png
 /checkpoints/
+/finetune_outputs/
 !/assets/*

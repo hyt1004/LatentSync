@@ -1,14 +1,14 @@
 data:
   syncnet_config_path: configs/syncnet/syncnet_16_pixel.yaml
   train_output_dir: debug/unet
-  train_fileslist: /mnt/bn/maliva-gen-ai-v2/chunyu.li/fileslist/all_data_v6.txt
+  train_fileslist: ""
   train_data_dir: ""
-  audio_embeds_cache_dir: /mnt/bn/maliva-gen-ai-v2/chunyu.li/audio_cache/whisper_new
-  audio_mel_cache_dir: /mnt/bn/maliva-gen-ai-v2/chunyu.li/audio_cache/mel_new
+  audio_embeds_cache_dir: ""
+  audio_mel_cache_dir: "./0finetune_datas/audio_mel_cache/"
 
-  val_video_path: assets/demo1_video.mp4
-  val_audio_path: assets/demo1_audio.wav
-  batch_size: 8 # 8
+  val_video_path: ""
+  val_audio_path: ""
+  batch_size: 4 # 8
   num_workers: 11 # 11
   num_frames: 16
   resolution: 256
