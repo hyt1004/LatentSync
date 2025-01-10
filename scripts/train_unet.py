@@ -138,26 +138,19 @@ def main(config):
     unet.requires_grad_(False)  # 禁止UNet参数更新
     # 选择部分参数允许更新
     # 部分层使用smaller lr
-    trainable_params_with_small_lr = []
-    trainable_params_with_normal_lr = []
+    trainable_params = []
     for name, param in unet.named_parameters():
-        if "mid_block" in name or "up_blocks" in name:
+        if "mid_block" in name or "up_blocks" in name or "conv_norm_out" in name or "conv_out" in name:
             param.requires_grad = True  # 允许更新
-            trainable_params_with_small_lr.append(param)
-        elif "conv_norm_out" in name or "conv_out" in name:
-            param.requires_grad = True  # 允许更新
-            trainable_params_with_normal_lr.append(param)
+            trainable_params.append(param)
 
     # 如果需要缩放学习率
     if config.optimizer.scale_lr:
         config.optimizer.lr = config.optimizer.lr * num_processes  # 根据进程数缩放学习率
 
-    optimizer = torch.optim.AdamW([{'params': trainable_params_with_normal_lr},
-                                   {'params': trainable_params_with_small_lr,
-                                    'lr': config.optimizer.lr / 10}], lr=config.optimizer.lr)  # 初始化优化器
+    optimizer = torch.optim.AdamW(trainable_params, lr=config.optimizer.lr)  # 初始化优化器
 
     if is_main_process:
-        trainable_params = trainable_params_with_small_lr + trainable_params_with_normal_lr
         logger.info(f"trainable params number: {len(trainable_params)}")  # 记录可训练参数数量
         logger.info(f"trainable params scale: {sum(p.numel() for p in trainable_params) / 1e6:.3f} M")  # 记录可训练参数规模
 
@@ -212,7 +205,7 @@ def main(config):
         lpips_loss_func = lpips.LPIPS(net="vgg").to(device)  # 初始化LPIPS损失函数
 
     if config.run.trepa_loss_weight != 0 and config.run.pixel_space_supervise:
-        trepa_loss_func = TREPALoss(device=device)  # 初始化TREPA损失函数
+        trepa_loss_func = TREPALoss(device=device, ckpt_path="./checkpoints/auxiliary/vit_g_hybrid_pt_1200e_ssv2_ft.pth")  # 初始化TREPA损失函数
 
     # validation pipeline
     pipeline = LipsyncPipeline(
@@ -462,12 +455,12 @@ def main(config):
                             ("Sync loss", train_step_list, sync_loss_list),  # 绘制同步损失图表
                         )
                 model_save_path = os.path.join(output_dir, f"checkpoints/checkpoint-{global_step}.pt")  # 检查点保存路径
-                state_dict = {
-                    "global_step": global_step,
-                    "state_dict": {k: v for k, v in unet.module.state_dict().items() if v.requires_grad},  # 只保存未冻结的参数
-                }
+                # state_dict = {
+                #     "global_step": global_step,
+                #     "state_dict": unet.module.state_dict(),  # 只保存未冻结的参数
+                # }
                 try:
-                    torch.save(state_dict, model_save_path)  # 保存模型状态字典
+                    torch.save(unet.module.state_dict(), model_save_path)  # 保存模型状态字典
                     logger.info(f"Saved checkpoint to {model_save_path}")  # 记录保存信息
                 except Exception as e:
                     logger.error(f"Error saving model: {e}")  # 记录保存错误
@@ -523,9 +516,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     # 配置文件路径
-    parser.add_argument("--unet_config_path", type=str, default="configs/unet/first_stage.yaml")
-    parser.add_argument("--finetune", action="store_true")
-    parser.add_argument("--finetune_checkpoint_path", type=str, default="./checkpoints/latentsync_unet.pt")
+    parser.add_argument("--unet_config_path", type=str, default="configs/unet/second_stage.yaml")
+    parser.add_argument("--finetune", type=bool, default=False)
+    parser.add_argument("--finetune_checkpoint_path", type=str, default="./finetune_outputs/train01/train-2025_01_10-09:46:31/checkpoints/checkpoint-1000.pt")
     parser.add_argument("--train_data_dir", type=str, default="./0finetune_datas/high_visual_quality/")
     parser.add_argument("--val_video_path", type=str, default="./0finetune_datas/c0118-1080p-10s.mp4")
     parser.add_argument("--val_audio_path", type=str, default="./0finetune_datas/kanghui_train_30s.mp3")
@@ -535,12 +528,13 @@ if __name__ == "__main__":
     config.unet_config_path = args.unet_config_path  # 设置配置文件路径
 
     if args.finetune:
-        config.data.train_output_dir = "finetune_outputs/unet"  # 设置训练输出目录
+        config.data.train_output_dir = "finetune_outputs/train01/"  # 设置训练输出目录
         config.data.train_data_dir = args.train_data_dir  # 设置训练数据目录
         config.data.val_video_path = args.val_video_path  # 设置验证视频路径
         config.data.val_audio_path = args.val_audio_path  # 设置验证音频路径
 
         config.run.finetune = True
+        config.optimizer.lr = 1e-5
         config.run.max_train_steps = 1000  # 设置最大训练步数
         config.ckpt.save_ckpt_steps = 500  # 设置保存检查点步数
         config.ckpt.resume_ckpt_path = args.finetune_checkpoint_path
