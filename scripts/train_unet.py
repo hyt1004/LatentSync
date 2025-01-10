@@ -517,7 +517,7 @@ if __name__ == "__main__":
 
     # 配置文件路径
     parser.add_argument("--unet_config_path", type=str, default="configs/unet/second_stage.yaml")
-    parser.add_argument("--finetune", type=bool, default=False)
+    parser.add_argument("--finetune", type=bool, default=True)
     parser.add_argument("--finetune_checkpoint_path", type=str, default="./finetune_outputs/train01/train-2025_01_10-09:46:31/checkpoints/checkpoint-1000.pt")
     parser.add_argument("--train_data_dir", type=str, default="./0finetune_datas/high_visual_quality/")
     parser.add_argument("--val_video_path", type=str, default="./0finetune_datas/c0118-1080p-10s.mp4")
@@ -534,7 +534,6 @@ if __name__ == "__main__":
         config.data.val_audio_path = args.val_audio_path  # 设置验证音频路径
 
         config.run.finetune = True
-        config.optimizer.lr = 1e-5
         config.run.max_train_steps = 1000  # 设置最大训练步数
         config.ckpt.save_ckpt_steps = 500  # 设置保存检查点步数
         config.ckpt.resume_ckpt_path = args.finetune_checkpoint_path
