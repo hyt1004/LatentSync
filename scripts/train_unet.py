@@ -522,7 +522,7 @@ def main(config):
                 break  # 如果达到最大训练步骤，退出循环
 
     progress_bar.close()  # 关闭进度条
-    dist.destroy_process_group()  # 销毁进程组
+    # dist.destroy_process_group()  # 销毁进程组
 
 
 if __name__ == "__main__":
