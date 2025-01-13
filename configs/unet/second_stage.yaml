@@ -8,8 +8,8 @@ data:
   
   val_video_path: ""
   val_audio_path: ""
-  batch_size: 2 # 8
-  num_workers: 11 # 11
+  batch_size: 1 # 8
+  num_workers: 2 # 11
   num_frames: 16
   resolution: 256
   mask: fix_mask
@@ -33,7 +33,7 @@ run:
   use_mixed_noise: true
   mixed_noise_alpha: 1 # 1
   mixed_precision_training: true
-  enable_gradient_checkpointing: false
+  enable_gradient_checkpointing: true
   enable_xformers_memory_efficient_attention: true
   max_train_steps: 10000000
   max_train_epochs: -1
